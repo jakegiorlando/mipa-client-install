@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# Prompt for required variables
+read -p "Enter short hostname (e.g., hostname): " HOSTNAME
+read -p "Enter full hostname (e.g., hostname.example.com): " HOSTNAME_FULL
+read -p "Enter client IP address (e.g., 192.168.1.1): " IP_CLIENT
+read -p "Enter IPA short hostname (e.g., ipa): " IPA
+read -p "Enter IPA full hostname (e.g., ipa.example.com): " IPA_FULL
+read -p "Enter Kerberos realm (e.g., EXAMPLE.COM): " REALM
+read -p "Enter domain (e.g., example.com): " DOMAIN
+
+# Ensure script is run as root
+if [[ $EUID -ne 0 ]]; then
+  echo "This script must be run as root"
+  exit 1
+fi
+
+# Check SSH access to IPA
+if ! ssh -q "${IPA}" exit; then
+  echo "Cannot SSH into IPA server (${IPA}). Aborting."
+  exit 1
+fi
+
+# Add host and retrieve keytab
+ssh "${IPA}" ipa host-add "${HOSTNAME_FULL}" --ip-address="${IP_CLIENT}"
+ssh "${IPA}" ipa host-add-managedby --hosts="${IPA_FULL}" "${HOSTNAME_FULL}"
+ssh "${IPA}" ipa-getkeytab -s "${IPA_FULL}" -p "host/${HOSTNAME_FULL}" -k "${HOSTNAME}.krb5.keytab"
+
+# Pull keytab securely from IPA to client
+ssh "${IPA}" cat "${HOSTNAME}.krb5.keytab" > ~/"${HOSTNAME}.krb5.keytab"
+
+# Install required packages (openSUSE)
+zypper install -y yast2-auth-client sssd sssd-ipa krb5-client openldap2-client sssd-ad cyrus-sasl-gssapi
+
+# Move and set permissions on keytab
+mv ~/"${HOSTNAME}.krb5.keytab" /etc/krb5.keytab
+chmod 0600 /etc/krb5.keytab
+chown root:root /etc/krb5.keytab
+
+# Set up CA cert
+mkdir -p /etc/ipa
+wget -O /etc/ipa/ca.crt "http://${IPA_FULL}/ipa/config/ca.crt"
+cp /etc/ipa/ca.crt /etc/pki/trust/anchors/ipa.crt
+update-ca-certificates --fresh
+
+# Ensure /etc/hosts has IPA entry
+grep -q "${IPA_FULL}" /etc/hosts || echo "${IP_CLIENT} ${IPA_FULL} ${IPA}" >> /etc/hosts
+
+# Backup and patch /etc/nsswitch.conf
+cp -f /etc/nsswitch.conf /etc/nsswitch.conf.bak
+TMPFILE=$(mktemp)
+declare -A defaults=(
+    ["passwd"]="passwd:     files sss"
+    ["shadow"]="shadow:     files sss"
+    ["group"]="group:      files sss"
+    ["services"]="services:       files sss"
+    ["netgroup"]="netgroup:       files nis sss"
+    ["automount"]="automount:      files nis sss"
+    ["sudoers"]="sudoers:        files sss"
+)
+
+for key in "${!defaults[@]}"; do
+    if grep -q "^$key:" /etc/nsswitch.conf; then
+        awk -v key="$key" '
+            $1 == key":" {
+                if ($0 !~ /sss/) $0 = $0 " sss";
+            }
+            { print }
+        ' /etc/nsswitch.conf > "$TMPFILE" && mv "$TMPFILE" /etc/nsswitch.conf
+    else
+        echo "${defaults[$key]}" >> /etc/nsswitch.conf
+    fi
+done
+
+# Backup and create /etc/sssd/sssd.conf
+mkdir -p /etc/sssd
+cp -f /etc/sssd/sssd.conf /etc/sssd/sssd.conf.bak 2>/dev/null
+cat > /etc/sssd/sssd.conf <<EOF
+[sssd]
+config_file_version = 2
+services = nss, pam, ssh, sudo
+domains = ${DOMAIN}
+
+[nss]
+homedir_substring = /home
+
+[pam]
+
+[domain/${DOMAIN}]
+cache_credentials = True
+krb5_store_password_if_offline = True
+krb5_realm = ${REALM}
+ipa_domain = ${DOMAIN}
+id_provider = ipa
+auth_provider = ipa
+access_provider = ipa
+ipa_hostname = ${HOSTNAME_FULL}
+chpass_provider = ipa
+ipa_server = _srv_, ${IPA_FULL}
+ldap_tls_cacert = /etc/ipa/ca.crt
+EOF
+
+# Create /etc/krb5.conf
+cat > /etc/krb5.conf <<EOF
+[libdefaults]
+default_realm = ${REALM}
+dns_lookup_realm = false
+dns_lookup_kdc = false
+rdns = false
+dns_canonicalize_hostname = false
+ticket_lifetime = 24h
+forwardable = true
+udp_preference_limit = 0
+default_ccache_name = KEYRING:persistent:%{uid}
+
+[realms]
+${REALM} = {
+  kdc = ${IPA_FULL}:88
+  master_kdc = ${IPA_FULL}:88
+  admin_server = ${IPA_FULL}:749
+  kpasswd_server = ${IPA_FULL}:464
+  default_domain = ${DOMAIN}
+  pkinit_anchors = FILE:/var/lib/ipa-client/pki/kdc-ca-bundle.pem
+  pkinit_pool = FILE:/var/lib/ipa-client/pki/ca-bundle.pem
+}
+
+[domain_realm]
+.${DOMAIN} = ${REALM}
+${DOMAIN} = ${REALM}
+${HOSTNAME_FULL} = ${REALM}
+
+[logging]
+kdc = FILE:/var/log/krb5/krb5kdc.log
+admin_server = FILE:/var/log/krb5/kadmind.log
+default = SYSLOG:NOTICE:DAEMON
+EOF
+
+# Final permissions and service setup
+chown root:root /etc/sssd/sssd.conf
+chmod 600 /etc/sssd/sssd.conf
+pam-config -a --sss
+systemctl enable sssd
+systemctl start sssd
+
+echo "Setup complete. You can now test with: kinit your_username"
