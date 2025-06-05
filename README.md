@@ -1,4 +1,4 @@
-# mipa-client-install
+# m(anual)ipa-client-install
 
 This script is used to manually set up a FreeIPA client on an openSUSE system.
 
