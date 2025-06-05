@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# Prompt for required variables
+read -p "Enter short hostname (e.g., hostname): " HOSTNAME
+read -p "Enter full hostname (e.g., hostname.example.com): " HOSTNAME_FULL
+read -p "Enter client IP address (e.g., 192.168.1.1): " IP_CLIENT
+read -p "Enter IPA full hostname (e.g., ipa.example.com): " IPA_FULL
+
+# Ensure script is run as root
+if [[ $EUID -ne 0 ]]; then
+  echo "This script must be run as root"
+  exit 1
+fi
+
+# Prompt user to authenticate
+echo "Please enter the password for the FreeIPA admin user:"
+kinit admin || { echo "kinit failed. Exiting."; exit 1; }
+
+# Add host and retrieve keytab
+ipa host-add "${HOSTNAME_FULL}" --ip-address="${IP_CLIENT}"
+ipa host-add-managedby --hosts="${IPA_FULL}" "${HOSTNAME_FULL}"
+ipa-getkeytab -s "${IPA_FULL}" -p "host/${HOSTNAME_FULL}" -k "${HOSTNAME}.krb5.keytab"
+
+# Send keytab to the client
+scp "${HOSTNAME}.krb5.keytab" "root@${HOSTNAME}:/root/" || {
+  echo "SCP failed. Make sure root SSH access is allowed on the client.";
+}

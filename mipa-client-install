@@ -15,20 +15,6 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# Check SSH access to IPA
-if ! ssh -q "${IPA}" exit; then
-  echo "Cannot SSH into IPA server (${IPA}). Aborting."
-  exit 1
-fi
-
-# Add host and retrieve keytab
-ssh "${IPA}" ipa host-add "${HOSTNAME_FULL}" --ip-address="${IP_CLIENT}"
-ssh "${IPA}" ipa host-add-managedby --hosts="${IPA_FULL}" "${HOSTNAME_FULL}"
-ssh "${IPA}" ipa-getkeytab -s "${IPA_FULL}" -p "host/${HOSTNAME_FULL}" -k "${HOSTNAME}.krb5.keytab"
-
-# Pull keytab securely from IPA to client
-ssh "${IPA}" cat "${HOSTNAME}.krb5.keytab" > ~/"${HOSTNAME}.krb5.keytab"
-
 # Install required packages (openSUSE)
 zypper install -y yast2-auth-client sssd sssd-ipa krb5-client openldap2-client sssd-ad cyrus-sasl-gssapi
 
