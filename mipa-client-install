@@ -22,6 +22,7 @@ zypper install -y yast2-auth-client sssd sssd-ipa krb5-client openldap2-client s
 mv ~/"${HOSTNAME}.krb5.keytab" /etc/krb5.keytab
 chmod 0600 /etc/krb5.keytab
 chown root:root /etc/krb5.keytab
+sudo restorecon -v /etc/krb5.keytab
 
 # Set up CA cert
 mkdir -p /etc/ipa
